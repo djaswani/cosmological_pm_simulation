@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.venv/
+
+# Editors / OS
+.vscode/
+.DS_Store
+Simulation.code-workspace
+
+# Simulation output — regenerable, and big
+*.png
+*.npy
+*.npz
+snapshots/
