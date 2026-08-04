@@ -15,7 +15,6 @@ class Mesh:
         self.h = 0
     def deposit_NGP(self, particles):
         self.density.fill(0)
-        dims = particles.positions.shape[1]
         indices = np.floor((particles.positions / self.cell_size)).astype(int)
         indices = indices % self.resolution
         np.add.at(self.density, tuple(indices.T), particles.mass)
@@ -38,7 +37,6 @@ class Mesh:
     def deposit_CIC(self, particles):
         self.density.fill(0)
 
-        dims = particles.positions.shape[1]
         for idx, weight in self.cic_weights(particles.positions):
             np.add.at(self.density, idx, weight * particles.mass)
 
@@ -46,7 +44,6 @@ class Mesh:
 
     def solve_potential(self, G=1.0):
         density_k = np.fft.fftn(self.density-self.density.mean())
-        dims = self.density.ndim
         density_k /= self.a ** 3
         k = np.fft.fftfreq(self.resolution, d=self.cell_size) * 2 * np.pi
         k_grids = np.meshgrid(*([k] * self.dims), indexing='ij')
@@ -58,7 +55,6 @@ class Mesh:
         return self.potential
     
     def compute_acceleration(self):
-        dims = self.density.ndim
         acceleration_fields = []
         for axis in range(self.dims):
             acceleration_fields.append(-(np.roll(self.potential, -1, axis=axis)-np.roll(self.potential, 1, axis=axis)) / (2 * self.cell_size))
