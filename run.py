@@ -1,6 +1,3 @@
-import numpy as np
-import matplotlib.pyplot as plt
-from itertools import product
 import simulation as S
 from simulation import run_simulation
 

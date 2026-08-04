@@ -19,7 +19,7 @@ class Mesh:
         indices = np.floor((particles.positions / self.cell_size)).astype(int)
         indices = indices % self.resolution
         np.add.at(self.density, tuple(indices.T), particles.mass)
-        self.density /= (self.cell_size ** dims)
+        self.density /= (self.cell_size ** self.dims)
 
     def cic_weights(self, positions):
         dims = positions.shape[1]
@@ -42,25 +42,25 @@ class Mesh:
         for idx, weight in self.cic_weights(particles.positions):
             np.add.at(self.density, idx, weight * particles.mass)
 
-        self.density /= (self.cell_size ** dims)
+        self.density /= (self.cell_size ** self.dims)
 
     def solve_potential(self, G=1.0):
         density_k = np.fft.fftn(self.density-self.density.mean())
         dims = self.density.ndim
         density_k /= self.a ** 3
         k = np.fft.fftfreq(self.resolution, d=self.cell_size) * 2 * np.pi
-        k_grids = np.meshgrid(*([k] * dims), indexing='ij')
+        k_grids = np.meshgrid(*([k] * self.dims), indexing='ij')
         k_squared = sum(k_axis**2 for k_axis in k_grids)
-        k_squared[(0,) * dims] = 1.0
+        k_squared[(0,) * self.dims] = 1.0
         potential_k = -4 * np.pi * G * density_k / k_squared
-        potential_k[(0,) * dims] = 0.0
+        potential_k[(0,) * self.dims] = 0.0
         self.potential = np.fft.ifftn(potential_k).real
         return self.potential
     
     def compute_acceleration(self):
         dims = self.density.ndim
         acceleration_fields = []
-        for axis in range(dims):
+        for axis in range(self.dims):
             acceleration_fields.append(-(np.roll(self.potential, -1, axis=axis)-np.roll(self.potential, 1, axis=axis)) / (2 * self.cell_size))
         self.acceleration_fields = acceleration_fields
 
@@ -68,12 +68,11 @@ class Mesh:
         dims = particles.positions.shape[1]
         acceleration = np.zeros_like(particles.positions)
         for idx, weight in self.cic_weights(particles.positions):
-            for axis in range(dims):
+            for axis in range(self.dims):
                 acceleration[:, axis] += weight * self.acceleration_fields[axis][idx]
         particles.accelerations = acceleration
 
     def evolve_a(self, step_a_factor, omega_m = 1, omega_lambda = 0):
-        dims = self.density.ndim
         a_old = self.a
         a_new = a_old * step_a_factor
         da = a_new - a_old
