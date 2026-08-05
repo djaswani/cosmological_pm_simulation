@@ -82,12 +82,44 @@ class Mesh:
 
 
 class Particles:
-    def __init__(self, box_size, n_particles, mass=None, dims=2):
+    def __init__(self, box_size, resolution, mass=None, dims=2, n=-2.0, seed=None):
         self.dims = dims
         self.box_size = box_size
-        self.n_particles = n_particles
+        self.resolution = resolution
+        self.n_particles = resolution ** dims
         self.mass = 1.0/self.n_particles if mass is None else mass
-        self.positions = np.random.uniform(0, self.box_size, size=(self.n_particles, self.dims))
+
+        # Gaussian random field with P(k) = k**n, built directly in Fourier space
+        rng = np.random.default_rng(seed)
+        d = box_size / resolution #cell size
+        k_axes = [np.fft.fftfreq(resolution, d=d) * 2 * np.pi] * (dims - 1)
+        k_axes.append(np.fft.rfftfreq(resolution, d=d) * 2 * np.pi)
+        k_grids = np.meshgrid(*k_axes, indexing='ij')
+        k_magnitude = np.sqrt(sum(kx**2 for kx in k_grids))
+        shape_k = k_magnitude.shape
+        k_real = rng.normal(size=shape_k)
+        k_im = rng.normal(size=shape_k)
+        delta_k = k_real + 1j * k_im
+        k_magnitude[(0,)*dims] = 1.0
+        power_spectrum = k_magnitude ** n
+        delta_k *= np.sqrt(power_spectrum)
+        delta_k[(0,)*dims] = 0.0
+
+        # displacement field psi, one real-space array per axis
+        psi = []
+        for axis in range(dims):
+            psi.append(np.fft.irfftn(1j * k_grids[axis] * delta_k / k_magnitude ** 2,
+                                     s=(resolution,) * dims))
+
+        # step 1: lay particles on a regular grid, one per cell centre
+        q = (np.arange(resolution) + 0.5) * d
+        grid = np.meshgrid(*([q] * dims), indexing='ij')
+        self.positions = np.stack([g.ravel() for g in grid], axis=-1)
+
+        # step 2: nudge each particle by the displacement at its own grid point
+        displacement = np.stack([p.ravel() for p in psi], axis=-1)
+        self.positions = (self.positions + displacement) % box_size
+
         self.velocities = np.zeros_like(self.positions)
         self.accelerations = np.zeros_like(self.positions)
 
@@ -106,8 +138,6 @@ def step(mesh, particles, dt):
     particles.velocities += particles.accelerations * (dt / 2)
     particles.velocities *= np.exp(-2 * mesh.h * dt / 2)
     
-
-
 def project(density, thickness=0.125):
     if density.ndim == 2:
         return density
