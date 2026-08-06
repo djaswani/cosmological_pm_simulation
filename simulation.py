@@ -3,16 +3,18 @@ import matplotlib.pyplot as plt
 from itertools import product
 
 class Mesh:
-    def __init__(self, box_size=1.0, resolution=64, dims=2, a=0.01):
+    def __init__(self, cosmo, box_size=1.0, resolution=64, dims=2, a=0.01):
         self.box_size = box_size
         self.resolution = resolution
         self.cell_size = box_size / resolution
         self.density = np.zeros((resolution,) * dims)
         self.dims = dims
         self.a = a
-        self.h_0 = np.sqrt(8 * np.pi / 3)
+        self.h_0 = cosmo.h_0
         self.t = (2/(3 * self.h_0)) * (a ** (3/2)) #initial time at which a = given value
-        self.h = 0
+        self.h = cosmo.hubble(a)
+        self.omega_m = cosmo.omega_m
+        self.omega_lambda = cosmo.omega_lambda
     def deposit_NGP(self, particles):
         self.density.fill(0)
         indices = np.floor((particles.positions / self.cell_size)).astype(int)
@@ -68,60 +70,77 @@ class Mesh:
                 acceleration[:, axis] += weight * self.acceleration_fields[axis][idx]
         particles.accelerations = acceleration
 
-    def evolve_a(self, step_a_factor, omega_m = 1, omega_lambda = 0):
+    def evolve_a(self, step_a_factor, cosmo):
         a_old = self.a
         a_new = a_old * step_a_factor
         da = a_new - a_old
         self.a = a_new # Stored as end of step value
         a_mid = (a_old + a_new) / 2
-        self.a_dot = self.h_0 * np.sqrt((omega_m/a_mid) + (omega_lambda * a_mid ** 2)) # Stored as mid-step value
+        self.a_dot = cosmo.a_dot(a_mid)
         dt = da / self.a_dot
-        self.h = self.a_dot / a_mid # Stored as mid-step value
+        self.h = cosmo.hubble(a_mid) # Stored as mid-step value
         self.t += dt # Stored as end of step value
         self.current_dt = dt
 
 
 class Particles:
-    def __init__(self, box_size, resolution, mass=None, dims=2, n=-2.0, seed=None):
-        self.dims = dims
-        self.box_size = box_size
+    def __init__(self, mesh, resolution, mass=None,):
+        self.dims = mesh.dims
+        self.box_size = mesh.box_size
         self.resolution = resolution
-        self.n_particles = resolution ** dims
+        self.n_particles = resolution ** self.dims
+        self.initial_a = mesh.a
         self.mass = 1.0/self.n_particles if mass is None else mass
 
-        # Gaussian random field with P(k) = k**n, built directly in Fourier space
+    def initialize_particles(self, cosmo, seed=None, n=-2.0, delta_rms=0.01):
         rng = np.random.default_rng(seed)
-        d = box_size / resolution #cell size
-        k_axes = [np.fft.fftfreq(resolution, d=d) * 2 * np.pi] * (dims - 1)
-        k_axes.append(np.fft.rfftfreq(resolution, d=d) * 2 * np.pi)
+        d = self.box_size / self.resolution #cell size
+        k_axes = [np.fft.fftfreq(self.resolution, d=d) * 2 * np.pi] * (self.dims - 1)
+        k_axes.append(np.fft.rfftfreq(self.resolution, d=d) * 2 * np.pi)
         k_grids = np.meshgrid(*k_axes, indexing='ij')
         k_magnitude = np.sqrt(sum(kx**2 for kx in k_grids))
         shape_k = k_magnitude.shape
         k_real = rng.normal(size=shape_k)
         k_im = rng.normal(size=shape_k)
         delta_k = k_real + 1j * k_im
-        k_magnitude[(0,)*dims] = 1.0
+        k_magnitude[(0,)*self.dims] = 1.0
         power_spectrum = k_magnitude ** n
         delta_k *= np.sqrt(power_spectrum)
-        delta_k[(0,)*dims] = 0.0
+        delta_k[(0,)*self.dims] = 0.0
 
-        # displacement field psi, one real-space array per axis
+        # rescale so the linear density field starts at the requested delta_rms
+        delta_x = np.fft.irfftn(delta_k, s=(self.resolution,) * self.dims, axes=range(self.dims))
+        scale = delta_rms / delta_x.std()
+
         psi = []
-        for axis in range(dims):
-            psi.append(np.fft.irfftn(1j * k_grids[axis] * delta_k / k_magnitude ** 2,
-                                     s=(resolution,) * dims))
+        for axis in range(self.dims):
+            psi.append(scale * np.fft.irfftn(1j * k_grids[axis] * delta_k / k_magnitude ** 2,s=(self.resolution,) * self.dims, axes=range(self.dims)))
 
-        # step 1: lay particles on a regular grid, one per cell centre
-        q = (np.arange(resolution) + 0.5) * d
-        grid = np.meshgrid(*([q] * dims), indexing='ij')
+        q = (np.arange(self.resolution) + 0.5) * d
+        grid = np.meshgrid(*([q] * self.dims), indexing='ij')
         self.positions = np.stack([g.ravel() for g in grid], axis=-1)
 
-        # step 2: nudge each particle by the displacement at its own grid point
         displacement = np.stack([p.ravel() for p in psi], axis=-1)
-        self.positions = (self.positions + displacement) % box_size
+        self.positions = (self.positions + displacement) % self.box_size
 
-        self.velocities = np.zeros_like(self.positions)
+        self.velocities = cosmo.growth_rate(self.initial_a) * cosmo.hubble(self.initial_a) * displacement
         self.accelerations = np.zeros_like(self.positions)
+
+class Cosmology:
+    def __init__(self, omega_m=1.0, omega_lambda=0.0):
+        self.omega_m = omega_m
+        self.omega_lambda = omega_lambda
+        self.h_0 = np.sqrt(8 * np.pi / (3 * self.omega_m))
+
+    def hubble(self, a):
+        return self.h_0 * np.sqrt(self.omega_m / a**3 + self.omega_lambda)
+
+    def a_dot(self, a):
+        return self.h_0 * np.sqrt((self.omega_m/a) + (self.omega_lambda * a ** 2))
+
+    def growth_rate(self, a):
+        return ((self.omega_m / a**3) / (self.omega_m / a ** 3 + self.omega_lambda)) ** 0.55
+
 
 def recompute_acceleration(mesh, particles):
     mesh.deposit_CIC(particles)
@@ -144,33 +163,39 @@ def project(density, thickness=0.125):
     else:
         return density[:, :, int((density.shape[2] // 2) - (thickness * density.shape[2] // 2)):int((density.shape[2] // 2) + (thickness * density.shape[2] // 2))].mean(axis=2)
 
-def run_simulation(n_steps, box_size=1.0, resolution=256, mass=None, dims=2, start_a=0.01, end_a=1.0):
-    m = Mesh(box_size=box_size, resolution=resolution, dims=dims, a=start_a)
-    p = Particles(box_size=m.box_size, n_particles=((2*m.resolution)**2), mass=mass, dims=dims)
-    recompute_acceleration(m, p)
-    snapshots = {}
-    for step_num in range(1,n_steps+1):
-        m.evolve_a(step_a_factor=np.exp(np.log(end_a / start_a)/n_steps))
-        step(m, p, m.current_dt)
-        if step_num % 25 == 0:
-            print(f"Step {step_num}/{n_steps}")
-            snapshots[step_num] = m.density.copy()
-    fig, axes = plt.subplots(2, 4)
-    for ax, n in zip(axes.flat, sorted(snapshots)):
-        ax.imshow(np.log10(project(snapshots[n]) + 0.1).T, origin="lower", cmap="viridis", vmin=-1, vmax=1.65)
-        ax.set_title(f"Step {n}")
-    plt.show()
+def run_simulation(n_steps, box_size=1.0, resolution=64, particle_resolution=None,
+                   mass=None, dims=2, start_a=0.01, end_a=1.0,
+                   omega_m=1.0, omega_lambda=0.0,
+                   spectral_index=-2.0, delta_rms=0.01, seed=None):
 
-if __name__ == "__main__":
-    m = Mesh()
-    print(m.density.shape, m.cell_size, m.density.sum())
-    p = Particles(m.box_size, ((2*m.resolution)**2))
-    print(p.positions.shape, p.velocities.shape, p.positions.min(), p.positions.max())
-    m.deposit_CIC(p)
-    print(m.density.sum() * m.cell_size**2, p.n_particles * p.mass)
-    for _ in range(500):
-        m.evolve_a(step_a_factor=np.exp(np.ln(1.0 + 0.01)/500))
-    print(f"t: {m.t}, a: {m.a}, a_dot: {m.a_dot}, ratio: {m.a / m.t ** (2/3)}")
-    plt.imshow(m.density.T, origin="lower")
-    plt.colorbar()
+    cosmo = Cosmology(omega_m=omega_m, omega_lambda=omega_lambda)
+    m = Mesh(cosmo, box_size=box_size, resolution=resolution, dims=dims, a=start_a)
+
+    if particle_resolution is None:
+        particle_resolution = resolution
+    p = Particles(m, resolution=particle_resolution, mass=mass)
+    p.initialize_particles(cosmo, seed=seed, n=spectral_index, delta_rms=delta_rms)
+
+    recompute_acceleration(m, p)
+
+    step_a_factor = np.exp(np.log(end_a / start_a) / n_steps)
+    n_rows, n_cols = 2, 4
+    snapshot_interval = max(1, n_steps // (n_rows * n_cols))
+    snapshots = {}
+    for step_num in range(1, n_steps + 1):
+        m.evolve_a(step_a_factor, cosmo)
+        step(m, p, m.current_dt)
+        if step_num % snapshot_interval == 0:
+            print(f"Step {step_num}/{n_steps}   a = {m.a:.4f}")
+            snapshots[step_num] = (m.a, m.density.copy())
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(3 * n_cols, 3 * n_rows),
+                             constrained_layout=True)
+    for ax in axes.flat:
+        ax.set_axis_off()
+    for ax, key in zip(axes.flat, sorted(snapshots)):
+        a_snap, dens = snapshots[key]
+        ax.imshow(np.log10(project(dens) + 0.1).T, origin="lower",
+                  cmap="viridis", vmin=-1, vmax=1.65)
+        ax.set_title(f"a = {a_snap:.3f}")
     plt.show()
