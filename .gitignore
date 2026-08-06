@@ -14,3 +14,6 @@ Simulation.code-workspace
 *.npy
 *.npz
 snapshots/
+
+# Misc
+CLAUDE.md

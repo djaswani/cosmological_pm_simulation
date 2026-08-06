@@ -63,7 +63,6 @@ class Mesh:
         self.acceleration_fields = acceleration_fields
 
     def interpolate_acceleration(self, particles):
-        dims = particles.positions.shape[1]
         acceleration = np.zeros_like(particles.positions)
         for idx, weight in self.cic_weights(particles.positions):
             for axis in range(self.dims):
@@ -81,6 +80,29 @@ class Mesh:
         self.h = cosmo.hubble(a_mid) # Stored as mid-step value
         self.t += dt # Stored as end of step value
         self.current_dt = dt
+
+    def measure_power_spectrum(self, n_bins=None):
+        delta = (self.density - self.density.mean()) / self.density.mean()
+        delta_k = np.fft.fftn(delta)
+        P = abs(delta_k) ** 2
+        P *= self.box_size ** self.dims / delta.size ** 2
+
+        k = np.fft.fftfreq(self.resolution, d=self.cell_size) * 2 * np.pi
+        k_grids = np.meshgrid(*([k] * self.dims), indexing='ij')
+        k_magnitude = np.sqrt(sum(k_axis ** 2 for k_axis in k_grids))
+
+        k_fundamental = 2 * np.pi / self.box_size
+        k_nyquist = np.pi / self.cell_size
+        if n_bins is None:
+            n_bins = int(k_nyquist / k_fundamental)
+        edges = np.linspace(k_fundamental / 2, k_nyquist, n_bins + 1)
+
+        power_sum, _ = np.histogram(k_magnitude, bins=edges, weights=P)
+        k_sum, _ = np.histogram(k_magnitude, bins=edges, weights=k_magnitude)
+        counts, _ = np.histogram(k_magnitude, bins=edges)
+
+        filled = counts > 0
+        return k_sum[filled] / counts[filled], power_sum[filled] / counts[filled]
 
 
 class Particles:
@@ -189,8 +211,8 @@ def run_simulation(n_steps, box_size=1.0, resolution=64, particle_resolution=Non
             print(f"Step {step_num}/{n_steps}   a = {m.a:.4f}")
             snapshots[step_num] = (m.a, m.density.copy())
 
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(3 * n_cols, 3 * n_rows),
-                             constrained_layout=True)
+    _, axes = plt.subplots(n_rows, n_cols, figsize=(3 * n_cols, 3 * n_rows),
+                           constrained_layout=True)
     for ax in axes.flat:
         ax.set_axis_off()
     for ax, key in zip(axes.flat, sorted(snapshots)):
