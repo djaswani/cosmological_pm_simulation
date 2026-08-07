@@ -114,7 +114,7 @@ class Particles:
         self.initial_a = mesh.a
         self.mass = 1.0/self.n_particles if mass is None else mass
 
-    def initialize_particles(self, cosmo, seed=None, n=-2.0, delta_rms=0.01):
+    def initialize_particles(self, cosmo, seed=None, n_s=0.965, box_size_mpc = 500, delta_rms=0.01):
         rng = np.random.default_rng(seed)
         d = self.box_size / self.resolution #cell size
         k_axes = [np.fft.fftfreq(self.resolution, d=d) * 2 * np.pi] * (self.dims - 1)
@@ -126,11 +126,14 @@ class Particles:
         k_im = rng.normal(size=shape_k)
         delta_k = k_real + 1j * k_im
         k_magnitude[(0,)*self.dims] = 1.0
-        power_spectrum = k_magnitude ** n
+        gamma = cosmo.omega_m * cosmo.h
+        k_phys = k_magnitude / box_size_mpc
+        q = k_phys / gamma
+        T = np.log(1+2.34 * q)/(2.34 * q) * (1 + 3.89 * q + (16.1 * q) ** 2 + (5.46 * q) ** 3 + (6.71 * q) ** 4) ** -0.25
+        power_spectrum = (k_magnitude ** n_s) * T ** 2
         delta_k *= np.sqrt(power_spectrum)
         delta_k[(0,)*self.dims] = 0.0
 
-        # rescale so the linear density field starts at the requested delta_rms
         delta_x = np.fft.irfftn(delta_k, s=(self.resolution,) * self.dims, axes=range(self.dims))
         scale = delta_rms / delta_x.std()
 
@@ -138,8 +141,8 @@ class Particles:
         for axis in range(self.dims):
             psi.append(scale * np.fft.irfftn(1j * k_grids[axis] * delta_k / k_magnitude ** 2,s=(self.resolution,) * self.dims, axes=range(self.dims)))
 
-        q = (np.arange(self.resolution) + 0.5) * d
-        grid = np.meshgrid(*([q] * self.dims), indexing='ij')
+        qs = (np.arange(self.resolution) + 0.5) * d
+        grid = np.meshgrid(*([qs] * self.dims), indexing='ij')
         self.positions = np.stack([g.ravel() for g in grid], axis=-1)
 
         displacement = np.stack([p.ravel() for p in psi], axis=-1)
@@ -149,10 +152,11 @@ class Particles:
         self.accelerations = np.zeros_like(self.positions)
 
 class Cosmology:
-    def __init__(self, omega_m=1.0, omega_lambda=0.0):
+    def __init__(self, omega_m=1.0, omega_lambda=0.0, h=0.674):
         self.omega_m = omega_m
         self.omega_lambda = omega_lambda
         self.h_0 = np.sqrt(8 * np.pi / (3 * self.omega_m))
+        self.h = h
 
     def hubble(self, a):
         return self.h_0 * np.sqrt(self.omega_m / a**3 + self.omega_lambda)
@@ -185,10 +189,7 @@ def project(density, thickness=0.125):
     else:
         return density[:, :, int((density.shape[2] // 2) - (thickness * density.shape[2] // 2)):int((density.shape[2] // 2) + (thickness * density.shape[2] // 2))].mean(axis=2)
 
-def run_simulation(n_steps, box_size=1.0, resolution=64, particle_resolution=None,
-                   mass=None, dims=2, start_a=0.01, end_a=1.0,
-                   omega_m=1.0, omega_lambda=0.0,
-                   spectral_index=-2.0, delta_rms=0.01, seed=None):
+def run_simulation(n_steps, box_size=1.0, resolution=64, particle_resolution=None, mass=None, dims=2, start_a=0.01, end_a=1.0, spectral_index = 0.965, omega_m=1.0, omega_lambda=0.0, delta_rms=0.01, seed=None):
 
     cosmo = Cosmology(omega_m=omega_m, omega_lambda=omega_lambda)
     m = Mesh(cosmo, box_size=box_size, resolution=resolution, dims=dims, a=start_a)
@@ -196,7 +197,7 @@ def run_simulation(n_steps, box_size=1.0, resolution=64, particle_resolution=Non
     if particle_resolution is None:
         particle_resolution = resolution
     p = Particles(m, resolution=particle_resolution, mass=mass)
-    p.initialize_particles(cosmo, seed=seed, n=spectral_index, delta_rms=delta_rms)
+    p.initialize_particles(cosmo, seed=seed, n_s=spectral_index, delta_rms=delta_rms)
 
     recompute_acceleration(m, p)
 
