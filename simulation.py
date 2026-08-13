@@ -3,15 +3,16 @@ import matplotlib.pyplot as plt
 from itertools import product
 
 class Mesh:
-    def __init__(self, cosmo, box_size=1.0, resolution=64, dims=2, a=0.01):
+    def __init__(self, cosmo, box_size=1.0, box_size_mpc=500.0, resolution=64, dims=2, a=0.01):
         self.box_size = box_size
+        self.box_size_mpc = box_size_mpc
         self.resolution = resolution
         self.cell_size = box_size / resolution
         self.density = np.zeros((resolution,) * dims)
         self.dims = dims
         self.a = a
         self.h_0 = cosmo.h_0
-        self.t = (2/(3 * self.h_0)) * (a ** (3/2)) #initial time at which a = given value
+        self.t = cosmo.time(a) #initial time at which a = given value
         self.h = cosmo.hubble(a)
         self.omega_m = cosmo.omega_m
         self.omega_lambda = cosmo.omega_lambda
@@ -109,12 +110,13 @@ class Particles:
     def __init__(self, mesh, resolution, mass=None,):
         self.dims = mesh.dims
         self.box_size = mesh.box_size
+        self.box_size_mpc = mesh.box_size_mpc
         self.resolution = resolution
         self.n_particles = resolution ** self.dims
         self.initial_a = mesh.a
         self.mass = 1.0/self.n_particles if mass is None else mass
 
-    def initialize_particles(self, cosmo, seed=None, n_s=0.965, box_size_mpc = 500, delta_rms=0.01):
+    def initialize_particles(self, cosmo, seed=None, n_s=0.965, delta_rms=0.01):
         rng = np.random.default_rng(seed)
         d = self.box_size / self.resolution #cell size
         k_axes = [np.fft.fftfreq(self.resolution, d=d) * 2 * np.pi] * (self.dims - 1)
@@ -127,7 +129,7 @@ class Particles:
         delta_k = k_real + 1j * k_im
         k_magnitude[(0,)*self.dims] = 1.0
         gamma = cosmo.omega_m * cosmo.h
-        k_phys = k_magnitude / box_size_mpc
+        k_phys = k_magnitude / self.box_size_mpc
         q = k_phys / gamma
         T = np.log(1+2.34 * q)/(2.34 * q) * (1 + 3.89 * q + (16.1 * q) ** 2 + (5.46 * q) ** 3 + (6.71 * q) ** 4) ** -0.25
         power_spectrum = (k_magnitude ** n_s) * T ** 2
@@ -167,6 +169,10 @@ class Cosmology:
     def growth_rate(self, a):
         return ((self.omega_m / a**3) / (self.omega_m / a ** 3 + self.omega_lambda)) ** 0.55
 
+    def time(self, a):
+        samples = np.linspace(0, a, 200)
+        with np.errstate(divide="ignore"):
+            return np.trapezoid(1/self.a_dot(samples), samples)
 
 def recompute_acceleration(mesh, particles):
     mesh.deposit_CIC(particles)
@@ -189,10 +195,31 @@ def project(density, thickness=0.125):
     else:
         return density[:, :, int((density.shape[2] // 2) - (thickness * density.shape[2] // 2)):int((density.shape[2] // 2) + (thickness * density.shape[2] // 2))].mean(axis=2)
 
-def run_simulation(n_steps, box_size=1.0, resolution=64, particle_resolution=None, mass=None, dims=2, start_a=0.01, end_a=1.0, spectral_index = 0.965, omega_m=1.0, omega_lambda=0.0, delta_rms=0.01, seed=None):
+def convert(quantity, value, cosmo, box_size_mpc, a=1.0):
+    rho_crit = 2.775e11
+    length = box_size_mpc / cosmo.h
+    time = cosmo.h_0 * 9.778 / cosmo.h
+    mass = cosmo.omega_m * rho_crit * box_size_mpc ** 3 / cosmo.h
+
+    if quantity == "comoving_length":
+        return value * length # Mpc
+    elif quantity == "proper_length":
+        return value * length * a # Mpc/h
+    elif quantity == "time":
+        return value * time # Gyr
+    elif quantity == "mass":
+        return value * mass # Msun
+    elif quantity == "peculiar_velocity":
+        return value * a * length / time * 977.8 # km/s
+    elif quantity == "density":
+        return value * mass / length ** 3 / a ** 3 # Msun / Mpc^3
+    else:
+        raise ValueError(f"unknown quantity: {quantity}")
+    
+def run_simulation(n_steps, box_size=1.0, box_size_mpc = 500, resolution=64, particle_resolution=None, mass=None, dims=2, start_a=0.01, end_a=1.0, spectral_index = 0.965, omega_m=1.0, omega_lambda=0.0, delta_rms=0.01, seed=None):
 
     cosmo = Cosmology(omega_m=omega_m, omega_lambda=omega_lambda)
-    m = Mesh(cosmo, box_size=box_size, resolution=resolution, dims=dims, a=start_a)
+    m = Mesh(cosmo, box_size=box_size, box_size_mpc=box_size_mpc, resolution=resolution, dims=dims, a=start_a)
 
     if particle_resolution is None:
         particle_resolution = resolution
@@ -222,3 +249,4 @@ def run_simulation(n_steps, box_size=1.0, resolution=64, particle_resolution=Non
                   cmap="viridis", vmin=-1, vmax=1.65)
         ax.set_title(f"a = {a_snap:.3f}")
     plt.show()
+    return m, p
